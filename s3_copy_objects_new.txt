@@ -1,0 +1,50 @@
+import boto3
+import json
+import re
+import datetime  
+        
+def lambda_handler(event, context):
+    
+    dest_dir = 'inbound-archive/ex_us/Veeva/APAC/Call2/'
+    call_type = '_Call2_'
+    search_token = 'inbound-archive/ex_us/'
+    
+    s3=boto3.resource('s3')
+    bucket_name ='com-merck-gmadw-dev-merck'
+    bucket = s3.Bucket(name=bucket_name)
+    
+    start_date = datetime.date(2019,1,1)
+    end_date = datetime.date(2022,1,1)
+    delta = datetime.timedelta(days=1)
+    
+    list_of_files = []
+
+    for obj in bucket.objects.all():
+        if 'Veeva' in obj.key and 'Cornerstone_APAC_' in obj.key and '05-2021' in obj.key and call_type in obj.key and search_token in obj.key:
+            list_of_files.append(obj.key)
+    #fetches date only after path inbound-archive/ex_us/Cornerstone_Apac        
+    date_list = {}
+    for each in list_of_files:
+        each_list = each.split('/')
+        search_token_index = each_list.index(search_token.split('/')[0])
+        value = each_list[search_token_index+2].split('_')[-1]
+        date_list[each] = value
+    print(date_list)
+    
+    #print(date_list.values())
+    sort_by_date = sorted([datetime.datetime.strptime(date, "%d-%m-%Y") for date in date_list.values()])
+    sort_by_date = [datetime.datetime.strftime(date, "%d-%m-%Y") for date in sort_by_date]
+    
+    print(sort_by_date)
+    final_files = []
+    for src_file_key in sort_by_date:
+        for key, value in date_list.items():
+            if src_file_key == value:
+                final_files.append(key)
+                dest_file_key = dest_dir + key.split('/')[-1]
+                s3.Object(bucket_name, dest_file_key).copy_from(CopySource = {'Bucket': bucket_name, 'Key': key})
+    return final_files
+    
+    print('Success')
+  
+   
