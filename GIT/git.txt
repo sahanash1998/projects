@@ -1,0 +1,81 @@
+$ git clone https://github.com/merck-gen/gma-gmabi-app-gmabi.git -b feature/GMABI-Repository-R18.0
+Cloning into 'gma-gmabi-app-gmabi'...
+remote: Enumerating objects: 9966, done.
+remote: Counting objects: 100% (1557/1557), done.
+remote: Compressing objects: 100% (623/623), done.
+remote: Total 9966 (delta 924), reused 1436 (delta 898), pack-reused 8409 (from 1)
+Receiving objects: 100% (9966/9966), 4.30 MiB | 5.50 MiB/s, done.
+Resolving deltas: 100% (5791/5791), done.
+Updating files: 100% (1979/1979), done.
+
+hulmani@avd001-6a01 MINGW64 ~/OneDrive - Merck Sharp & Dohme LLC/Documents/R 18.0
+$ cd gma-gmabi-app-gmabi
+
+hulmani@avd001-6a01 MINGW64 ~/OneDrive - Merck Sharp & Dohme LLC/Documents/R 18.0/gma-gmabi-app-gmabi (feature/GMABI-Repository-R18.0)
+$ git fetch origin feature/GMABI-Repository-R18.0
+From https://github.com/merck-gen/gma-gmabi-app-gmabi
+ * branch            feature/GMABI-Repository-R18.0 -> FETCH_HEAD
+
+hulmani@avd001-6a01 MINGW64 ~/OneDrive - Merck Sharp & Dohme LLC/Documents/R 18.0/gma-gmabi-app-gmabi (feature/GMABI-Repository-R18.0)
+$ git pull origin feature/GMABI-Repository-R18.0
+From https://github.com/merck-gen/gma-gmabi-app-gmabi
+ * branch            feature/GMABI-Repository-R18.0 -> FETCH_HEAD
+Already up to date.
+
+hulmani@avd001-6a01 MINGW64 ~/OneDrive - Merck Sharp & Dohme LLC/Documents/R 18.0/gma-gmabi-app-gmabi (feature/GMABI-Repository-R18.0)
+$ git checkout -b GB-481_SAPTRINO
+Switched to a new branch 'GB-481_SAPTRINO'
+
+hulmani@avd001-6a01 MINGW64 ~/OneDrive - Merck Sharp & Dohme LLC/Documents/R 18.0/gma-gmabi-app-gmabi (GB-481_SAPTRINO)
+$ git status
+On branch GB-481_SAPTRINO
+nothing to commit, working tree clean
+
+hulmani@avd001-6a01 MINGW64 ~/OneDrive - Merck Sharp & Dohme LLC/Documents/R 18.0/gma-gmabi-app-gmabi (GB-481_SAPTRINO)
+$hulmani@avd001-6a01 MINGW64 ~/OneDrive - Merck Sharp & Dohme LLC/Documents/R 18.0/gma-gmabi-app-gmabi (GB-481_SAPTRINO)
+$ git add *
+
+hulmani@avd001-6a01 MINGW64 ~/OneDrive - Merck Sharp & Dohme LLC/Documents/R 18.0/gma-gmabi-app-gmabi (GB-481_SAPTRINO)
+$ git status
+On branch GB-481_SAPTRINO
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+        new file:   DDL/GMADW_SAP_STAGE(TRINO)/gmadw_sap_stage.fsa_proj_pln_act_var_cost_mrlgma_ps02_full/gmadw_sap_stage.fsa_proj_pln_act_var_cost_mrlgma_ps02_full.txt
+
+
+hulmani@avd001-6a01 MINGW64 ~/OneDrive - Merck Sharp & Dohme LLC/Documents/R 18.0/gma-gmabi-app-gmabi (GB-481_SAPTRINO)
+$ git commit -m "GB-481 SAPTRINO"
+[GB-481_SAPTRINO 9a2076b] GB-481 SAPTRINO
+ Committer: Hulmani <hulmani@merck.com>
+Your name and email address were configured automatically based
+on your username and hostname. Please check that they are accurate.
+You can suppress this message by setting them explicitly:
+
+    git config --global user.name "Your Name"
+    git config --global user.email you@example.com
+
+After doing this, you may fix the identity used for this commit with:
+
+    git commit --amend --reset-author
+
+ 1 file changed, 57 insertions(+)
+ create mode 100644 DDL/GMADW_SAP_STAGE(TRINO)/gmadw_sap_stage.fsa_proj_pln_act_var_cost_mrlgma_ps02_full/gmadw_sap_stage.fsa_proj_pln_act_var_cost_mrlgma_ps02_full.txt
+
+hulmani@avd001-6a01 MINGW64 ~/OneDrive - Merck Sharp & Dohme LLC/Documents/R 18.0/gma-gmabi-app-gmabi (GB-481_SAPTRINO)
+$ git push origin GB-481_SAPTRINO
+Enumerating objects: 9, done.
+Counting objects: 100% (9/9), done.
+Delta compression using up to 4 threads
+Compressing objects: 100% (6/6), done.
+Writing objects: 100% (6/6), 987 bytes | 329.00 KiB/s, done.
+Total 6 (delta 3), reused 2 (delta 0), pack-reused 0
+remote: Resolving deltas: 100% (3/3), completed with 3 local objects.
+remote:
+remote: Create a pull request for 'GB-481_SAPTRINO' on GitHub by visiting:
+remote:      https://github.com/merck-gen/gma-gmabi-app-gmabi/pull/new/GB-481_SAPTRINO
+remote:
+To https://github.com/merck-gen/gma-gmabi-app-gmabi.git
+ * [new branch]      GB-481_SAPTRINO -> GB-481_SAPTRINO
+
+
+
