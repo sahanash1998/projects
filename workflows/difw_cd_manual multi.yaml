@@ -1,0 +1,96 @@
+#
+#
+# WORKFLOW FOR SERVING THE PROCESS OF MANUAL DEPLOYMENT OF DATASET PACKAGE
+#
+#
+name: "[DIFW_manual] Dataset CD Multi"
+run-name: "[DIFW_manual] Dataset CD - ${{ inputs.dataset-name }}:${{ inputs.dataset-version }} - ${{ inputs.environment }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      # Name of dataset
+      dataset-name:
+        description: 'Dataset name'
+        required: true
+        type: string
+      # Name of source dataset branch
+      dataset-version:
+        description: 'Dataset version'
+        required: true
+        type: string
+      # Clean deploy
+      clean-deploy:
+        description: 'Flag indicate whether remove all AWS resources related with this deployment before deploy or not'
+        required: false
+        type: boolean
+        default: false
+      # environment where to deploy
+      environment:
+        description: 'Environment'
+        required: true
+        type: choice
+        options: ["dev","tst","uat","prd"]
+
+jobs:
+  prepare-env:
+    environment: ${{ inputs.environment }}
+    runs-on: [ "linux-x64-small" ]
+    outputs:
+      all-environments-list: ${{ vars.ALL_ENVIRONMENTS_LIST }}
+      dataset-repository-name: ${{ vars.DATASET_REPOSITORY_NAME }}
+      project-group-id: ${{ vars.PROJECT_GROUP_ID }}
+      artifactory-repo-id: ${{ vars.ARTIFACTORY_REPOSITORY_ID }}
+      artifactory-url: ${{ vars.ARTIFACTORY_URL}}
+      artifact-group-id: ${{ vars.PROJECT_GROUP_ID}}
+      aws-region: ${{ vars.AWS_REGION}}
+      airflow-host: ${{ vars.AIRFLOW_EKS_AIRFLOW_HOST }}
+
+    steps:
+      - name: Environment variables
+        run: "echo Environment variables prepared"
+
+  # ====================================================================================================================
+  # This job parse core version of dataset
+  # ====================================================================================================================
+  ci-init:
+    needs: prepare-env
+    runs-on: [ "linux-x64-small" ]
+    outputs:
+      difw-core-version: ${{ steps.parse-core-version.outputs.difw-core-version }}
+    steps:
+        - name: Parse core version
+          id: parse-core-version
+          uses: merck-gen/mf-difw-automation/.github/actions/difw_components/parse-core-framework-version@main
+          with:
+            dataset-name: ${{ inputs.dataset-name }}
+            dataset-version: ${{ inputs.dataset-version }}
+            srv-github-token: ${{ secrets.SRV_GITHUB_TOKEN }}
+            artifactory-url: ${{ needs.prepare-env.outputs.artifactory-url }}
+            artifactory-username: ${{ secrets.ARTIFACTORY_SRV_USER_NAME }}
+            artifactory-password: ${{ secrets.ARTIFACTORY_SRV_USER_PASSWORD }}
+            artifactory-token: ${{ secrets.ARTIFACTORY_TOKEN }}
+            artifact-group-id: ${{ needs.prepare-env.outputs.artifact-group-id }}
+            artifactory-repo-id: ${{ needs.prepare-env.outputs.artifactory-repo-id }}
+            dataset-repository-name: ${{ needs.prepare-env.outputs.dataset-repository-name }}
+
+  # ====================================================================================================================
+  # This job will recall reusable workflow difw_cd_dataset_resolver.yaml from main tag
+  # ====================================================================================================================
+  difw_cd_manual:
+    needs: [prepare-env, ci-init ]
+    uses: merck-gen/mf-difw-automation/.github/workflows/difw_resolver_cd_dataset.yaml@main
+    with:
+      environment: ${{ inputs.environment }}
+      dataset-name: ${{ inputs.dataset-name }}
+      dataset-version: ${{ inputs.dataset-version }}
+      clean-deploy: ${{ inputs.clean-deploy }}
+      all-environments-list: ${{ needs.prepare-env.outputs.all-environments-list }}
+      project-group-id: ${{ needs.prepare-env.outputs.project-group-id }}
+      artifactory-repo-id: ${{ needs.prepare-env.outputs.artifactory-repo-id }}
+      dataset-repository-name: ${{ needs.prepare-env.outputs.dataset-repository-name }}
+      difw-core-version: ${{ needs.ci-init.outputs.difw-core-version }}
+      artifactory-url: ${{ needs.prepare-env.outputs.artifactory-url }}
+      aws-region:  ${{ needs.prepare-env.outputs.aws-region }}
+      airflow-host: ${{ needs.prepare-env.outputs.airflow-host }}
+    secrets: inherit

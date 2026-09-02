@@ -1,0 +1,130 @@
+name: Deploy DDL to Databricks
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to deploy from'
+        required: true
+        default: 'develop'
+      environment:
+        description: 'Deployment environment (e.g., dev, Sit , production)'
+        required: true
+        type: choice
+        options: ["dev","tst","uat","prd"]
+      ddl_path:
+        description: 'Path to the DDL scripts directory (relative to the repository root)'
+        required: true
+        default: 'ddl'
+
+jobs:
+  deploy:
+    runs-on: "linux-x64-small"
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Check user permission
+        run: |
+          # Skip access check for dev environment
+          if [[ "${{ github.event.inputs.environment }}" == "dev" ]]; then
+            echo "✅ Dev environment: Access granted for all users"
+            exit 0
+          fi
+          
+          # Use the environment-specific variable for allowed users
+          # Create env specific secret ALLOWED_USERS_GITHUB_ACTIONS 
+          # Enter secret value as a space separated user list - user1@merck user2@merck
+          ALLOWED_USERS="${{ secrets.ALLOWED_USERS_GITHUB_ACTIONS }}"
+          CURRENT_USER="${{ github.actor }}"
+          
+          if [[ ! " $ALLOWED_USERS " =~ " $CURRENT_USER " ]]; then
+            echo "❌ Access Denied: User $CURRENT_USER is not authorized to run this workflow"
+            exit 1
+          fi
+          echo "✅ Access granted for user: $CURRENT_USER"
+
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.9'
+
+      - name: Install Databricks CLI
+        run: |
+          pip install databricks-sql-cli
+
+      # The following code snippet has been commented out because AWS secrets are not being used in the Databricks deployment. 
+      # Additionally, due to recent organization‑level policy changes in GitHub, referencing the action aws-actions/configure-aws-credentials@v4 is resulting in an error.
+      #- name: Configure AWS Credentials
+      #  uses: aws-actions/configure-aws-credentials@v4
+      #  with:
+      #    aws-access-key-id: ${{ secrets.AWS_DEPLOY_USER_ACCESS_KEY }}
+      #    aws-secret-access-key: ${{ secrets.AWS_DEPLOY_USER_SECRET_KEY }}
+      #    aws-region: us-east-1
+
+      - name: Deploy DDL Scripts in Numeric Prefix Order
+        env:
+          DBSQLCLI_HOST_NAME: ${{ secrets.DATABRICKS_HOST }}
+          DBSQLCLI_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+          DBSQLCLI_ACCESS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: |
+          
+          echo "Initializing dbsqlcli configuration..."
+          # dbsqlcli fails the very first invocation due to missing config files
+          # pass a dummy sql to generate the config file before actual processing  
+          dbsqlcli \
+            --hostname "${{ secrets.DATABRICKS_HOST }}" \
+            --http-path "${{ secrets.DATABRICKS_HTTP_PATH }}" \
+            --access-token "${{ secrets.DATABRICKS_TOKEN }}" \
+            -e "SELECT 1" > /dev/null 2>&1 || true
+          deploy_sql_file() {
+            local file="$1"
+            local env="${{ github.event.inputs.environment }}"
+            echo "Processing file: $file"
+            # Create a temporary file with environment variables replaced
+            temp_file=$(mktemp)
+            # Replace ENV and also convert to Unix style file endings
+            sed -e 's/\r$//' -e "s/\${ENV}/$env/g" "$file" > "$temp_file"
+            
+             output=$(dbsqlcli \
+              --hostname "${{ secrets.DATABRICKS_HOST }}" \
+              --http-path "${{ secrets.DATABRICKS_HTTP_PATH }}" \
+              --access-token "${{ secrets.DATABRICKS_TOKEN }}" \
+              -e "$temp_file" 2>&1)
+            
+            local result=$?
+            echo "Run return code from dbsqlcli $result"
+            if [ $result -ne 0 ]; then
+              echo "Error details for $file:"
+              echo "$output"
+            else
+              echo "Success output for $file:"
+              echo "$output"
+            fi
+            return $result
+          }
+          
+          failed_files=()
+          for file in $(find ./${{ github.event.inputs.ddl_path }} \( -name "*.sql" -o -name "*.txt" \) -type f | sort -V); do
+            if deploy_sql_file "$file"; then
+              echo "✅ Successfully deployed $file"
+            else
+              echo "❌ Failed to deploy $file"
+              failed_files+=("$file")
+            fi
+          done
+          
+          echo "Deployment Summary:"
+          echo "==================="
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "Total files processed: $(find ./${{ github.event.inputs.ddl_path }} \( -name "*.sql" -o -name "*.txt" \) -type f | wc -l)"
+          echo "Failed files: ${#failed_files[@]}"
+          
+          if [ ${#failed_files[@]} -ne 0 ]; then
+            echo "Failed files:"
+            printf '%s\n' "${failed_files[@]}"
+            exit 1
+          fi

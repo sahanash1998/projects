@@ -1,0 +1,128 @@
+#
+#
+# WORKFLOW FOR SERVING THE PROCESS OF MANUAL CREATION OF DATASET PACKAGE
+# Supports processing all datasets under datasets/ directory
+#
+#
+name: "[DIFW_manual] Dataset CI Multi"
+run-name: "[DIFW_manual] Dataset CI - All Datasets:${{ inputs.dataset-source-branch }}"
+on:
+  workflow_dispatch:
+    inputs:
+      # Environment selection for access control
+      # environment:
+      #   description: 'Environment (dev, test, uat, prod)'
+      #   required: true
+      #   type: string
+      #   default: 'dev'
+      # Option to process all datasets or specific ones
+      process-all-datasets:
+        description: 'Process all datasets in datasets/ directory'
+        required: true
+        type: boolean
+        default: true
+      # Names of specific datasets (space-separated) if not processing all
+      dataset-names:
+        description: 'Specific dataset names (space-separated, ignored if process-all-datasets is true)'
+        required: false
+        type: string
+      # Name of source dataset branch
+      dataset-source-branch:
+        description: 'Dataset source branch'
+        required: true
+        type: string
+        default: main
+
+
+jobs:
+  # check-access:
+  #   runs-on: "linux-x64-small"
+  #   environment: ${{ inputs.environment }}
+  #   steps:
+  #     - name: Check user permission
+  #       run: |
+  #         # Skip access check for dev environment
+  #         if [[ "${{ inputs.environment }}" == "dev" ]]; then
+  #           echo "✅ Dev environment: Access granted for all users"
+  #           exit 0
+  #         fi
+          
+  #         # Use the environment-specific variable for allowed users
+  #         ALLOWED_USERS="${{ secrets.ALLOWED_USERS_GITHUB_ACTIONS }}"
+  #         CURRENT_USER="${{ github.actor }}"
+          
+  #         # Check if current user is in the allowed users list
+  #         if [[ ! " $ALLOWED_USERS " =~ " $CURRENT_USER " ]]; then
+  #           echo "❌ Access Denied: User $CURRENT_USER is not authorized to run this workflow"
+  #           exit 1
+  #         fi
+  #         echo "✅ Access granted for user: $CURRENT_USER"
+
+  # ====================================================================================================================
+  # This job parses the dataset names and prepares for matrix execution
+  # ====================================================================================================================
+  prepare-matrix:
+    # needs: check-access
+    runs-on: [ "linux-x64-small" ]
+    outputs:
+      dataset-matrix: ${{ steps.set-matrix.outputs.dataset-matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ vars.DATASET_REPOSITORY_NAME }}
+          ref: ${{ inputs.dataset-source-branch }}
+          token: ${{ secrets.SRV_GITHUB_TOKEN }}
+          
+      - name: Set dataset matrix
+        id: set-matrix
+        run: |
+          if [[ "${{ inputs.process-all-datasets }}" == "true" ]]; then
+            # Get all first-level directories under datasets/
+            DATASETS=$(find datasets -maxdepth 1 -mindepth 1 -type d | sed 's|datasets/||' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          else
+            # Use the manually specified dataset names
+            DATASETS=$(echo "${{ inputs.dataset-names }}" | tr ' ' '\n' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          fi
+          echo "dataset-matrix=${DATASETS}" >> $GITHUB_OUTPUT
+
+  # ====================================================================================================================
+  # This job parse core version of dataset
+  # ====================================================================================================================
+  ci-init:
+    needs: prepare-matrix
+    runs-on: [ "linux-x64-small" ]
+    strategy:
+      matrix:
+        dataset-name: ${{ fromJson(needs.prepare-matrix.outputs.dataset-matrix) }}
+      fail-fast: false
+    outputs:
+      difw-core-version: ${{ steps.parse-core-version.outputs.difw-core-version }}
+    steps:
+      - name: Parse core version
+        id: parse-core-version
+        uses: merck-gen/mf-difw-automation/.github/actions/difw_components/parse-core-framework-version@main
+        with:
+          dataset-repository-name: ${{ vars.DATASET_REPOSITORY_NAME }}
+          dataset-name: ${{ matrix.dataset-name }}
+          dataset-source-branch: ${{ inputs.dataset-source-branch }}
+          srv-github-token: ${{ secrets.SRV_GITHUB_TOKEN }}
+
+  # ====================================================================================================================
+  # This job will recall reusable workflow difw_resolver_ci_dataset.yaml from main tag
+  # ====================================================================================================================
+  difw-ci-manual:
+    needs: [prepare-matrix, ci-init]
+    strategy:
+      matrix:
+        dataset-name: ${{ fromJson(needs.prepare-matrix.outputs.dataset-matrix) }}
+      fail-fast: false
+    uses: merck-gen/mf-difw-automation/.github/workflows/difw_resolver_ci_dataset.yaml@main
+    with:
+      difw-core-version: ${{ needs.ci-init.outputs.difw-core-version }}
+      dataset-name: ${{ matrix.dataset-name }}
+      dataset-source-branch: ${{ inputs.dataset-source-branch }}
+      dataset-repository-name: ${{ vars.DATASET_REPOSITORY_NAME }}
+      artifactory-repo-id:  ${{ vars.ARTIFACTORY_REPOSITORY_ID }}
+      artifactory-url: ${{ vars.ARTIFACTORY_URL }}
+    secrets: inherit

@@ -1,0 +1,69 @@
+name: "[DIFW_project] Deploy orchestration for project"
+run-name: "[DIFW_project] Deploy orchestration for project - ${{ github.actor }}"
+
+#
+# INPUT ARGUMENTS
+#
+on:
+  workflow_dispatch:
+    inputs:
+      difw-core-version:
+        description: 'Which DIFW core version to deploy'
+        required: true
+        type: string
+
+      environment:
+        description: 'Environment'
+        required: true
+        type: choice
+        options: ["dev","tst","uat","prd"]
+
+      dataset-repository-branch:
+        description: Project dataset repository branch to take shared code from
+        type: string
+        required: false
+
+      version-type:
+        description: 'Version type to deploy'
+        required: true
+        type: choice
+        options:
+          - release
+          - pre-release
+          - snapshot
+        default: release
+
+
+#
+# JOBS SECTION
+#
+jobs:
+  prepare-env:
+    environment: ${{ inputs.environment }}
+    runs-on: [ "linux-x64-small" ]
+    outputs:
+      eks-repository-name: ${{ vars.AIRFLOW_EKS_REPO_NAME }}
+      eks-repository-branch:  ${{ vars.AIRFLOW_EKS_REPO_BRANCH }}
+      airflow-dag-folder: ${{ vars.AIRFLOW_EKS_DAG_FOLDER }}
+      airflow-version: ${{ vars.AIRFLOW_VERSION }}
+      artifactory-url: ${{ vars.ARTIFACTORY_URL }}
+      dataset-repository-name: ${{ vars.DATASET_REPOSITORY_NAME }}
+    steps:
+      - name: Environment variables
+        run: "echo Environment variables prepared"
+
+  invoke-resolver:
+    needs: prepare-env
+    uses: merck-gen/mf-difw-automation/.github/workflows/difw_resolver_deploy_orchestration.yaml@main
+    with:
+      environment: ${{ inputs.environment }}
+      eks-repository-name: ${{ needs.prepare-env.outputs.eks-repository-name }}
+      eks-repository-branch:  ${{ needs.prepare-env.outputs.eks-repository-branch }}
+      airflow-dag-folder: ${{ needs.prepare-env.outputs.airflow-dag-folder }}
+      airflow-version: ${{ needs.prepare-env.outputs.airflow-version }}
+      artifactory-url: ${{ needs.prepare-env.outputs.artifactory-url }}
+      difw-core-version: ${{ inputs.difw-core-version }}
+      dataset-repository-name: ${{ needs.prepare-env.outputs.dataset-repository-name }}
+      dataset-repository-branch: ${{ inputs.dataset-repository-branch }}
+      version-type: ${{ inputs.version-type }}
+    secrets: inherit

@@ -1,0 +1,112 @@
+#
+#
+# WORKFLOW FOR SERVING THE PROCESS OF MANUAL DELETION OF DATASET
+#
+#
+name: "[DIFW_manual] Dataset destroy"
+run-name: "[DIFW_manual] Dataset destroy - ${{ inputs.dataset-name }}:${{ inputs.dataset-version }}${{ inputs.dataset-source-branch }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      # Name of dataset
+      dataset-name:
+        description: 'Dataset name'
+        required: true
+        type: string
+      # Version of dataset. Either  dataset-version or dataset-source-branch has to be used
+      dataset-version:
+        description: 'Dataset version'
+        required: false
+        type: string
+        default: ''
+      # Branch from project specific dataset used for build and deployment. Either  dataset-version or dataset-source-branch has to be used
+      dataset-source-branch:
+        description: 'Dataset source branch'
+        required: false
+        type: string
+        default: ''
+      # Flag indicates whether remove your personal dataset
+      is-personal-dataset:
+        description: 'Is personal dataset'
+        required: false
+        type: boolean
+        default: false
+      environment:
+        description: 'Environment'
+        required: true
+        type: choice
+        options: ["dev","tst","uat","prd"]
+      components-to-clean:
+        description: 'Json of components you want to clean'
+        required: true
+        type: string
+        default: |
+          {
+            "clean-resources": "true",
+            "clean-airflow-dag": "false",
+            "clean-tables": "false",
+            "clean-data": "false",
+            "clean-aws-data-catalog": "false",
+            "clean-aws-unity-catalog": "false",
+            "clean-custom-resources": "false",
+            "clean-metadata-storage": "false"
+          }
+
+jobs:
+
+  # ====================================================================================================================
+  # This job parse core version of dataset
+  # ====================================================================================================================
+  destroy-dataset-init:
+    runs-on: [ "linux-x64-small" ]
+    environment: ${{ inputs.environment }}
+    outputs:
+      difw-core-version: ${{ steps.parse-core-version.outputs.difw-core-version }}
+      airflow-eks-repo-name: ${{ vars.AIRFLOW_EKS_REPO_NAME }}
+      airflow-eks-repo-branch: ${{ vars.AIRFLOW_EKS_REPO_BRANCH }}
+      airflow-eks-airflow-host: ${{ vars.AIRFLOW_EKS_AIRFLOW_HOST }}
+      airflow-eks-dag-folder: ${{ vars.AIRFLOW_EKS_DAG_FOLDER || 'dags' }}
+    steps:
+      - name: Parse core version
+        id: parse-core-version
+        uses: merck-gen/mf-difw-automation/.github/actions/difw_components/parse-core-framework-version@main
+        with:
+          dataset-repository-name: ${{ vars.DATASET_REPOSITORY_NAME }}
+          dataset-name: ${{ inputs.dataset-name }}
+          dataset-version: ${{ inputs.dataset-version }}
+          dataset-source-branch: ${{ inputs.dataset-source-branch }}
+          srv-github-token: ${{ secrets.SRV_GITHUB_TOKEN }}
+          artifactory-repo-id: ${{ vars.ARTIFACTORY_REPOSITORY_ID }}
+          artifactory-url: ${{ vars.ARTIFACTORY_URL}}
+          artifactory-username: ${{ secrets.ARTIFACTORY_SRV_USER_NAME }}
+          artifactory-password: ${{ secrets.ARTIFACTORY_SRV_USER_PASSWORD }}
+          artifactory-token: ${{ secrets.ARTIFACTORY_TOKEN }}
+          artifact-group-id: ${{ vars.PROJECT_GROUP_ID }}
+
+
+  # ====================================================================================================================
+  # This job will recall reusable workflow difw_resolver_destroy_dataset.yaml from main tag
+  # ====================================================================================================================
+  difw-destroy-dataset-manual:
+    needs: destroy-dataset-init
+    uses: merck-gen/mf-difw-automation/.github/workflows/difw_resolver_destroy_dataset.yaml@main
+    with:
+      difw-core-version: ${{ needs.destroy-dataset-init.outputs.difw-core-version }}
+      dataset-name: ${{ inputs.dataset-name }}
+      environment: ${{ inputs.environment }}
+      dataset-version: ${{ inputs.dataset-version }}
+      dataset-source-branch: ${{ inputs.dataset-source-branch }}
+      airflow-eks-repo-branch: ${{ needs.destroy-dataset-init.outputs.airflow-eks-repo-branch }}
+      airflow-eks-repo-name: ${{ needs.destroy-dataset-init.outputs.airflow-eks-repo-name }}
+      airflow-eks-airflow-host: ${{ needs.destroy-dataset-init.outputs.airflow-eks-airflow-host }}
+      airflow-eks-dag-folder: ${{ needs.destroy-dataset-init.outputs.airflow-eks-dag-folder }}
+      is-personal-dataset: ${{ inputs.is-personal-dataset }}
+      components-to-clean: ${{ inputs.components-to-clean }}
+      artifactory-repo-id: ${{ vars.ARTIFACTORY_REPOSITORY_ID }}
+      artifact-group-id: ${{ vars.PROJECT_GROUP_ID }}
+      artifactory-url: ${{ vars.ARTIFACTORY_URL }}
+      all-environments-list: ${{ vars.ALL_ENVIRONMENTS_LIST }}
+      aws-region: ${{ vars.AWS_REGION }}
+      project-name: ${{ vars.PROJECT_NAME }}
+    secrets: inherit

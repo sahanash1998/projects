@@ -1,0 +1,56 @@
+#
+#
+# WORKFLOW FOR SERVING THE PROCESS OF MANUAL CREATION OF DATASET PACKAGE
+#
+#
+name: "[DIFW_manual] Dataset CI"
+run-name: "[DIFW_manual] Dataset CI - ${{ inputs.dataset-name }}:${{ inputs.dataset-source-branch }}"
+on:
+  workflow_dispatch:
+    inputs:
+      # Name of dataset
+      dataset-name:
+        description: 'Dataset name'
+        required: true
+        type: string
+      # Name of source dataset branch
+      dataset-source-branch:
+        description: 'Dataset source branch'
+        required: true
+        type: string
+        default: main
+
+
+jobs:
+
+  # ====================================================================================================================
+  # This job parse core version of dataset
+  # ====================================================================================================================
+  ci-init:
+    runs-on: [ "linux-x64-small" ]
+    outputs:
+      difw-core-version: ${{ steps.parse-core-version.outputs.difw-core-version }}
+    steps:
+      - name: Parse core version
+        id: parse-core-version
+        uses: merck-gen/mf-difw-automation/.github/actions/difw_components/parse-core-framework-version@main
+        with:
+          dataset-repository-name: ${{ vars.DATASET_REPOSITORY_NAME }}
+          dataset-name: ${{ inputs.dataset-name }}
+          dataset-source-branch: ${{ inputs.dataset-source-branch }}
+          srv-github-token: ${{ secrets.SRV_GITHUB_TOKEN }}
+
+  # ====================================================================================================================
+  # This job will recall reusable workflow difw_resolver_ci_dataset.yaml from main tag
+  # ====================================================================================================================
+  difw-ci-manual:
+    needs: ci-init
+    uses: merck-gen/mf-difw-automation/.github/workflows/difw_resolver_ci_dataset.yaml@main
+    with:
+      difw-core-version: ${{ needs.ci-init.outputs.difw-core-version }}
+      dataset-name: ${{ inputs.dataset-name }}
+      dataset-source-branch: ${{ inputs.dataset-source-branch }}
+      dataset-repository-name: ${{ vars.DATASET_REPOSITORY_NAME }}
+      artifactory-repo-id:  ${{ vars.ARTIFACTORY_REPOSITORY_ID }}
+      artifactory-url: ${{ vars.ARTIFACTORY_URL }}
+    secrets: inherit

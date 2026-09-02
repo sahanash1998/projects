@@ -1,0 +1,184 @@
+name: Cross-Repository File Integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Feature branch
+        required: true
+        default: ""
+
+      src_branch:
+        description: Source branch 
+        required: true
+        default: ""
+
+      source_repo:
+        description: Source Repository Name
+        required: true
+        default: ""
+
+      path_input:
+        description: Path to file.txt
+        required: true
+        default: "file.txt"
+
+      is_keyword_replace:
+        description: Replace Keyword In File
+        type: boolean
+        required: false
+        default: true
+
+      find_text:
+        description: "Fine: Used only if keyword replacement is enabled"
+        required: false
+        default: ""
+
+      replace_text:
+        description: "Replace: Used only if keyword replacement is enabled"
+        required: false
+        default: ''
+
+      is_create_pr:
+        description: Create Pull Request
+        type: boolean
+        required: false
+        default: true
+
+      reviewer:
+        description: "Reviewer: Used only if Create PR is enabled"
+        required: false
+        default: ''      
+      
+jobs:
+  Copy-Files:
+    runs-on: "linux-x64-small"
+    
+    steps:
+        #Checkout destination branch
+      - name: Checkout Target Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Checkout Source Branch
+        uses: actions/checkout@v4
+        with:
+          repository: merck-gen/${{ inputs.source_repo }}
+          token: ${{ secrets.SRV_GITHUB_TOKEN }}
+          path: "temp_folder"
+          ref: ${{ inputs.src_branch }}
+          submodules: false
+          fetch-depth: 1
+          
+      - name: Copy Files
+        run: |
+              FILE_LIST="${{ inputs.path_input }}"
+              SRC_ROOT="temp_folder"
+              DEST_DIR="$(dirname $FILE_LIST)"
+              echo "Destination DIR: $FILE_LIST"
+              
+              # Array to store missing files
+              missing_files=()
+
+              if [ ! -f "$FILE_LIST" ]; then
+                echo "file list not found: $FILE_LIST"
+                exit 1
+              fi
+          
+              while IFS= read -r file || [ -n "$file" ]; do
+                file="$(echo "$file" | xargs)"   # trim whitespace
+                [ -z "$file" ] && continue
+          
+                full_path="$SRC_ROOT/$file"
+                echo "Processing: $full_path"
+          
+                if [ -f "$full_path" ]; then
+                    #Copy the file from DEST repo to GMABI Repo
+                    cp "$full_path" "$DEST_DIR/"
+                else
+                    echo "Missing source file: $full_path"
+                    missing_files+=("$full_path")
+                fi
+              done < "$FILE_LIST"
+              
+              echo "================ Summary ================"
+      
+              if [ ${#missing_files[@]} -gt 0 ]; then
+                echo "Missing files:"
+                printf '%s\n' "${missing_files[@]}"
+              else
+                echo "All files were found and copied successfully."
+              fi
+
+      - name: Replace Keyword In Copied Files
+        run: |              
+              if [ "${{ inputs.is_keyword_replace }}" = "true" ]; then
+                  echo "=================== Keyword replacement enabled ==================="
+                  find_value='${{ inputs.find_text }}'
+                  replace_value='${{ inputs.replace_text }}'
+                  
+                  DEST_DIR="$(dirname "${{ inputs.path_input }}")"    
+                  echo "Replacing text in: $DEST_DIR"
+                  echo "Find Text: $find_value"
+                  echo "Replace Text: $replace_value"
+                  COUNT=$(find "$DEST_DIR" -type f | wc -l)
+                  echo "Processing $COUNT files in: $DEST_DIR"    
+                  find "$DEST_DIR" -type f -exec sed -i "s/$find_value/$replace_value/g" {} +
+                else
+                  echo "====================== Skipping replacement ========================"
+              fi
+
+      - name: Cleanup Temp Folder
+        run: |
+          echo "Removing Temp Folder..."
+          rm -rf temp_folder
+
+      - name: Commit and push changes
+        env:
+          BRANCH_NAME: ${{inputs.branch}}
+        run: |
+          git config user.name "${{github.actor}}"
+          git config user.email "${{github.actor}}@merck.com"
+          git checkout "$BRANCH_NAME"
+          git add .
+          git commit -m "Copied MSL Copilot files into GMABI Repo" || echo "No changes to commit"
+          git push --set-upstream origin "$BRANCH_NAME"
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH_NAME: ${{ inputs.branch }}
+        run: |
+          if [[ "${{ inputs.is_create_pr }}" != "true" ]]; then
+            echo "============ Skipping Pull Request task ============"
+            exit 0
+          fi
+      
+          # If PR already exists, do not fail the job
+          existing_pr=$(gh pr list \
+                        --base develop \
+                        --head "$BRANCH_NAME" \
+                        --state open \
+                        --json number \
+                        --jq '.[0].number')
+      
+          if [[ -n "$existing_pr" ]]; then
+            echo "PR already exists for $BRANCH_NAME -> develop (PR #$existing_pr). Skipping creation."
+            exit 0
+          fi
+      
+          if [[ -n "${{ inputs.reviewer }}" ]]; then
+            gh pr create \
+              --base develop \
+              --head "$BRANCH_NAME" \
+              --reviewer "${{ inputs.reviewer }}" \
+              --title "Import files into GMABI repository" \
+              --body "This PR includes files that needs to be deployed in the current release."
+          else
+            gh pr create \
+              --base develop \
+              --head "$BRANCH_NAME" \
+              --title "Import files into GMABI repository" \
+              --body "This PR includes files that needs to be deployed in the current release."
+          fi

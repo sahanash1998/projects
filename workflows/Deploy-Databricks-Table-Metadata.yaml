@@ -1,0 +1,342 @@
+name: Deploy Databricks Table Metadata
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment (e.g., dev, Sit , production)'
+        required: true
+        type: choice
+        options: ["dev","tst","uat","prd"]
+      volume_path:
+        description: 'Volume Directory Path (containing table_comments.csv and column_comments.csv)'
+        required: true
+        default: '/Volumes/mrl_gmabi_dev/gmadw_file_loader/file_loader_volume/gmadw_file_loader/AI_Readiness'
+
+jobs:
+  deploy:
+    runs-on: "linux-x64-small"
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Check user permission
+        run: |
+          # Skip access check for dev environment
+          if [[ "${{ github.event.inputs.environment }}" == "dev" ]]; then
+            echo "✅ Dev environment: Access granted for all users"
+            exit 0
+          fi
+          
+          # Use the environment-specific variable for allowed users
+          # Create env specific secret ALLOWED_USERS_GITHUB_ACTIONS 
+          # Enter secret value as a space separated user list - user1@merck user2@merck
+          ALLOWED_USERS="${{ secrets.ALLOWED_USERS_GITHUB_ACTIONS }}"
+          CURRENT_USER="${{ github.actor }}"
+          
+          if [[ ! " $ALLOWED_USERS " =~ " $CURRENT_USER " ]]; then
+            echo "❌ Access Denied: User $CURRENT_USER is not authorized to run this workflow"
+            exit 1
+          fi
+          echo "✅ Access granted for user: $CURRENT_USER"
+
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install requests pandas tabulate 
+
+      - name: Execute SQL Queries
+        env:
+          DATABRICKS_HOST: "https://merck-mrldhetl-${{ github.event.inputs.environment }}-dbricks-ws.cloud.databricks.com"
+          DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          CSV_FILE_PATH: ${{ github.event.inputs.volume_path }}
+          CATALOG_NAME: "mrl_gmabi_${{ github.event.inputs.environment }}"
+        run: |
+          python << 'EOF'
+
+          import os
+          import requests
+          import pandas as pd
+          import time
+          from io import StringIO
+          from tabulate import tabulate
+          
+          host = os.environ["DATABRICKS_HOST"]
+          http_path = os.environ["DATABRICKS_HTTP_PATH"]
+          token = os.environ["DATABRICKS_TOKEN"]
+          path = os.environ["CSV_FILE_PATH"]
+          catalog_name = os.environ["CATALOG_NAME"]
+
+          # Derive warehouse_id from http_path: /sql/1.0/warehouses/<warehouse_id>
+          WAREHOUSE_ID = http_path.rstrip("/").split("/")[-1]
+          API_URL = f"{host}/api/2.0/sql/statements"
+          HEADERS = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+          
+          def execute_sql(statement: str) -> dict:
+            """Execute a single SQL statement and wait for completion."""
+            payload = {
+                "warehouse_id": WAREHOUSE_ID,
+                "statement": statement,
+                "wait_timeout": "30s",
+            }
+            response = requests.post(API_URL, headers=HEADERS, json=payload)
+            response.raise_for_status()
+            result = response.json()
+
+            # Poll if still pending
+            while result.get("status", {}).get("state") in ("PENDING", "RUNNING"):
+                time.sleep(2)
+                stmt_id = result["statement_id"]
+                poll = requests.get(f"{API_URL}/{stmt_id}", headers=HEADERS)
+                poll.raise_for_status()
+                result = poll.json()
+
+            return result
+
+          def read_csv_from_volume(file_path: str) -> list:
+            """Download CSV from Databricks Volume and return rows as a list of dicts."""
+            print(f"📥 Downloading CSV from: {file_path}")
+            print("=" * 100)
+            
+            response = requests.get(
+                f"{host}/api/2.0/fs/files{file_path}",
+                headers={"Authorization": f"Bearer {token}"}
+            )
+            response.raise_for_status()
+            
+            csv_content = response.content.decode('utf-8')
+            df = pd.read_csv(StringIO(csv_content))
+            
+            print(f"\n✅ Successfully loaded CSV with {len(df)} rows and {len(df.columns)} columns")
+            print(f"\n📊 Column Names:")
+            for i, col in enumerate(df.columns, 1):
+                print(f"   {i}. {col}")
+            
+            # Truncate long strings for display (keep original for processing)
+            df_display = df.head(5).copy()
+            for col in df_display.columns:
+                df_display[col] = df_display[col].astype(str).apply(lambda x: x[:50] + '...' if len(x) > 50 else x)
+            
+            print(f"\n📋 Data Preview (First 5 rows):")
+            print(tabulate(df_display, headers='keys', tablefmt='grid', showindex=False))
+            
+            return df.to_dict(orient='records')
+
+          def run_sql_queries(sql_queries: list, label: str):
+            """Execute a list of SQL queries using execute_sql and print summary."""
+            if not sql_queries:
+                print(f"⚠️  No {label} queries to execute")
+                return 0, 0
+                
+            print(f"\n🚀 EXECUTING {label} QUERIES ({len(sql_queries)} total)...")
+            print("=" * 100)
+            successful, failed = 0, 0
+            for i, sql in enumerate(sql_queries, 1):
+                print(f"\n[{i}/{len(sql_queries)}] Executing: {sql[:120]}...")
+                try:
+                    result = execute_sql(sql)
+                    state = result.get("status", {}).get("state", "UNKNOWN")
+                    if state == "SUCCEEDED":
+                        print(f"   ✅ Success")
+                        successful += 1
+                    else:
+                        error_msg = result.get("status", {}).get("error", {}).get("message", "Unknown error")
+                        print(f"   ❌ Failed [{state}]: {error_msg}")
+                        failed += 1
+                except Exception as e:
+                    print(f"   ❌ Error: {e}")
+                    failed += 1
+            print(f"\n📊 {label} Summary — ✅ Successful: {successful} | ❌ Failed: {failed}")
+            return successful, failed
+
+          def generate_queries(rows: list, query_generator, label: str) -> list:
+            """Generate SQL queries from rows using a generator function."""
+            queries = []
+            for idx, row in enumerate(rows):
+                try:
+                    sql = query_generator(row)
+                    if sql:
+                        queries.append(sql)
+                except Exception as e:
+                    print(f"⚠️  Warning: Error processing {label} row {idx}: {e}")
+            return queries
+
+          def generate_table_comment_query(row: dict) -> str:
+            """Generate COMMENT ON TABLE query from table comments row."""
+            schema_name = str(row.get('Schema_Name', '')).strip()
+            table_name  = str(row.get('Object_Name', '')).strip()
+            comment = str(row.get('Comment', '')).strip()
+            flag        = str(row.get('Flag', '')).strip()
+
+            if not all([schema_name, table_name, comment]) or flag.upper() != 'Y':
+                return None
+
+            safe_comment = comment.replace("'", "''")
+            full_table   = f"{catalog_name}.{schema_name}.{table_name}"
+            return f"COMMENT ON TABLE {full_table} IS '{safe_comment}';"
+
+          def generate_column_comment_queries_in_warehouse(rows: list) -> list:
+            """Generate column comment SQL in Databricks using information_schema table types."""
+            def clean_value(value) -> str:
+              if value is None:
+                return ""
+              if pd.isna(value):
+                return ""
+              text = str(value).strip()
+              if text.lower() in ("", "nan", "none", "null"):
+                return ""
+              return text
+
+            filtered_rows = []
+            ignored_rows = 0
+            for row in rows:
+              schema_name = clean_value(row.get('Schema_Name', ''))
+              table_name = clean_value(row.get('Object_Name', ''))
+              column_name = clean_value(row.get('Column_Name', ''))
+              comment = clean_value(row.get('Comment', ''))
+              flag = clean_value(row.get('Flag', '')).upper()
+
+              if flag != 'Y':
+                ignored_rows += 1
+                continue
+
+              if all([schema_name, table_name, column_name, comment]):
+                filtered_rows.append((schema_name, table_name, column_name, comment))
+              else:
+                ignored_rows += 1
+
+            if ignored_rows:
+              print(f"ℹ️  Ignored {ignored_rows} rows (Flag is not Y or required fields are empty)")
+
+            if not filtered_rows:
+                return []
+
+            values_rows = []
+            for schema_name, table_name, column_name, comment in filtered_rows:
+                esc_schema = schema_name.replace("'", "''")
+                esc_table = table_name.replace("'", "''")
+                esc_column = column_name.replace("'", "''")
+                esc_comment = comment.replace("'", "''")
+                values_rows.append(
+                    f"('{esc_schema}', '{esc_table}', '{esc_column}', '{esc_comment}')"
+                )
+
+            values_sql = ",\n                ".join(values_rows)
+            generation_sql = f"""
+            WITH requested_columns(schema_name, table_name, column_name, comment_text) AS (
+                VALUES
+                {values_sql}
+            )
+            SELECT
+                CASE
+                    WHEN upper(replace(coalesce(t.table_type, ''), '_', ' ')) IN ('MANAGED', 'EXTERNAL', 'STREAMING TABLE')
+                        THEN concat(
+                            'ALTER TABLE ',
+                            '{catalog_name}', '.', r.schema_name, '.', r.table_name,
+                            ' ALTER COLUMN ', r.column_name,
+                        ' COMMENT ',
+                        chr(39),
+                        replace(r.comment_text, chr(39), concat(chr(39), chr(39))),
+                        chr(39),
+                        ';'
+                        )
+                    WHEN upper(replace(coalesce(t.table_type, ''), '_', ' ')) = 'VIEW'
+                        THEN concat(
+                            'COMMENT ON COLUMN ',
+                            '{catalog_name}', '.', r.schema_name, '.', r.table_name,
+                            '.', r.column_name,
+                        ' IS ',
+                        chr(39),
+                        replace(r.comment_text, chr(39), concat(chr(39), chr(39))),
+                        chr(39),
+                        ';'
+                        )
+                    WHEN upper(replace(coalesce(t.table_type, ''), '_', ' ')) = 'MATERIALIZED VIEW'
+                        THEN concat(
+                            'ALTER MATERIALIZED VIEW ',
+                            '{catalog_name}', '.', r.schema_name, '.', r.table_name,
+                            ' ALTER COLUMN ', r.column_name,
+                        ' COMMENT ',
+                        chr(39),
+                        replace(r.comment_text, chr(39), concat(chr(39), chr(39))),
+                        chr(39),
+                        ';'
+                        )
+                    ELSE concat(
+                        '-- Unsupported object type [', coalesce(t.table_type, 'UNKNOWN'), '] for ',
+                        '{catalog_name}', '.', r.schema_name, '.', r.table_name, '.', r.column_name
+                    )
+                END AS generated_sql
+            FROM requested_columns r
+            LEFT JOIN {catalog_name}.information_schema.tables t
+              ON lower(t.table_schema) = lower(r.schema_name)
+             AND lower(t.table_name) = lower(r.table_name)
+            """.strip()
+
+            generation_result = execute_sql(generation_sql)
+            generation_state = generation_result.get("status", {}).get("state", "UNKNOWN")
+            if generation_state != "SUCCEEDED":
+                error_msg = generation_result.get("status", {}).get("error", {}).get("message", "Unknown error")
+                print(f"❌ Failed to generate column comment SQL [{generation_state}]: {error_msg}")
+                return []
+
+            result_rows = generation_result.get("result", {}).get("data_array", []) or []
+            generated_queries = []
+            for row in result_rows:
+                generated_sql = str(row[0]).strip() if row else ""
+                if not generated_sql:
+                    continue
+                if generated_sql.startswith("-- Unsupported object type"):
+                    print(f"⚠️  {generated_sql}")
+                    continue
+                generated_queries.append(generated_sql)
+
+            print(f"✅ Generated {len(generated_queries)} column comment queries in warehouse")
+            return generated_queries
+
+          # ── 1. TABLE COMMENTS ──────────────────────────────────────────────────────
+          print(f"\n" + "=" * 100)
+          print("🔧 PROCESSING TABLE COMMENTS (table_comments.csv)")
+          print("=" * 100)
+
+          table_csv_path = f"{path.rstrip('/')}/table_comments.csv"
+          table_rows = read_csv_from_volume(table_csv_path)
+          table_sql_queries = generate_queries(table_rows, generate_table_comment_query, "Table Comments")
+          
+          t_ok, t_fail = run_sql_queries(table_sql_queries, "TABLE COMMENTS")
+
+          # ── 2. COLUMN COMMENTS ─────────────────────────────────────────────────────
+          print(f"\n" + "=" * 100)
+          print("🔧 PROCESSING COLUMN COMMENTS (column_comments.csv)")
+          print("=" * 100)
+
+          column_csv_path = f"{path.rstrip('/')}/column_comments.csv"
+          column_rows = read_csv_from_volume(column_csv_path)
+          column_sql_queries = generate_column_comment_queries_in_warehouse(column_rows)
+          
+          c_ok, c_fail = run_sql_queries(column_sql_queries, "COLUMN COMMENTS")
+
+          # ── FINAL SUMMARY ──────────────────────────────────────────────────────────
+          #total_ok   = t_ok + c_ok
+          #total_fail = t_fail + c_fail
+          print(f"\n" + "=" * 100)
+          print(f"📊 FINAL EXECUTION SUMMARY")
+          print("=" * 100)
+          print(f"   Table  comments  — ✅ {t_ok} succeeded | ❌ {t_fail} failed")
+          print(f"   Column comments  — ✅ {c_ok} succeeded | ❌ {c_fail} failed")
+          #print(f"   Total            — ✅ {total_ok} succeeded | ❌ {total_fail} failed")
+          if t_fail == 0 and c_fail == 0:
+              print(f"\n🎉 All comments updated successfully!")
+          else:
+              print(f"\n⚠️  {t_ok} table comments succeeded, {t_fail} table comments failed")
+              print(f"⚠️  {c_ok} column comments succeeded, {c_fail} column comments failed")
+              exit(1)
+          print("=" * 100)
+          
+          EOF

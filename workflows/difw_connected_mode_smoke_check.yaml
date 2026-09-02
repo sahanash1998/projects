@@ -1,0 +1,493 @@
+name: "[DIFW_manual] Connected Mode Smoke Check"
+
+on:
+  workflow_dispatch:
+    inputs:
+      dataset-name:
+        description: "Dataset name (e.g., saptrino)"
+        required: true
+        type: string
+      environment:
+        description: "Environment"
+        required: true
+        type: choice
+        options: ["_dev_", "_tst_", "_prd_"]
+      source-type:
+        description: "Source database type"
+        required: true
+        type: choice
+        options: ["trino", "oracle", "sqlserver"]
+      source-catalog:
+        description: "Source catalog (for Trino)"
+        required: false
+        type: string
+        default: ""
+      source-schema:
+        description: "Source schema"
+        required: true
+        type: string
+      table-name:
+        description: "Source table name"
+        required: true
+        type: string
+      target-schema:
+        description: "Target Databricks schema"
+        required: true
+        type: string
+      target-table:
+        description: "Target Databricks table name (defaults to source table name)"
+        required: false
+        type: string
+        default: ""
+      write-mode:
+        description: "Databricks DDL mode"
+        required: true
+        type: choice
+        options: ["OR_REPLACE", "IF_NOT_EXISTS"]
+        default: "OR_REPLACE"
+      include-audit-column:
+        description: "Append load_dt_tm TIMESTAMP if not present"
+        required: true
+        type: choice
+        options: ["true", "false"]
+        default: "true"
+      deploy-to-databricks:
+        description: "Deploy generated DDL to Databricks"
+        required: true
+        type: choice
+        options: ["no", "yes"]
+        default: "no"
+      deploy-confirmation:
+        description: "Type APPLY to confirm Databricks execution when deploy-to-databricks=yes"
+        required: false
+        type: string
+        default: ""
+      use-job:
+        description: "Dataset job name containing source connection config"
+        required: true
+        type: string
+        default: "stage_loader"
+      use-step:
+        description: "Dataset step name containing source connection config"
+        required: true
+        type: string
+        default: "stage_loader"
+
+jobs:
+  connected-smoke-check:
+    runs-on: "linux-x64-small"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml boto3 trino oracledb pymssql requests
+
+      - name: Run connected-mode smoke check
+        env:
+          DATASET_NAME: ${{ inputs.dataset-name }}
+          ENV_NAME: ${{ inputs.environment }}
+          SOURCE_TYPE: ${{ inputs.source-type }}
+          SOURCE_CATALOG: ${{ inputs.source-catalog }}
+          SOURCE_SCHEMA: ${{ inputs.source-schema }}
+          TABLE_NAME: ${{ inputs.table-name }}
+          TARGET_SCHEMA: ${{ inputs.target-schema }}
+          TARGET_TABLE: ${{ inputs.target-table }}
+          WRITE_MODE: ${{ inputs.write-mode }}
+          INCLUDE_AUDIT_COLUMN: ${{ inputs.include-audit-column }}
+          USE_JOB: ${{ inputs.use-job }}
+          USE_STEP: ${{ inputs.use-step }}
+          AWS_REGION: us-east-1
+          DDL_OUTPUT_FILE: generated_ddl.sql
+        run: |
+          python << 'PY'
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          import yaml
+
+          stage_status = {
+              "secret_reference": "FAIL",
+              "secret_fetch": "FAIL",
+              "network_connection": "FAIL",
+              "auth": "FAIL",
+              "metadata": "FAIL",
+          }
+
+          dataset = os.environ["DATASET_NAME"]
+          env_name = os.environ["ENV_NAME"]
+          source_type = os.environ["SOURCE_TYPE"].lower().strip()
+          source_catalog = os.environ.get("SOURCE_CATALOG", "").strip()
+          source_schema = os.environ["SOURCE_SCHEMA"].strip()
+          table_name = os.environ["TABLE_NAME"].strip()
+          target_schema = os.environ["TARGET_SCHEMA"].strip()
+          target_table = (os.environ.get("TARGET_TABLE", "").strip() or table_name)
+          write_mode = os.environ.get("WRITE_MODE", "OR_REPLACE").strip().upper()
+          include_audit_column = os.environ.get("INCLUDE_AUDIT_COLUMN", "true").strip().lower() == "true"
+          use_job = os.environ["USE_JOB"].strip()
+          use_step = os.environ["USE_STEP"].strip()
+
+          def quote_ident(name: str) -> str:
+              return "`" + name.replace("`", "``") + "`"
+
+          def normalize_decimal(precision: int, scale: int) -> str:
+              if precision < scale:
+                  return f"DECIMAL({scale},{scale})"
+              return f"DECIMAL({precision},{scale})"
+
+          def map_type_to_databricks(source_dtype: str) -> str:
+              t = (source_dtype or "").strip().upper()
+
+              if t.startswith(("VARCHAR", "NVARCHAR", "CHAR", "NCHAR", "TEXT", "CLOB", "STRING")):
+                  return "STRING"
+              if t.startswith(("TIMESTAMP", "DATETIME")):
+                  return "TIMESTAMP"
+              if t.startswith("DATE"):
+                  return "DATE"
+              if t.startswith(("BLOB", "VARBINARY", "BINARY")):
+                  return "BINARY"
+              if t.startswith(("BOOLEAN", "BIT")):
+                  return "BOOLEAN"
+              if t.startswith(("JSON",)):
+                  return "STRING"
+
+              if t.startswith(("NUMBER", "DECIMAL", "NUMERIC")):
+                  m = re.search(r"\((\d+)\s*(?:,\s*(\d+))?\)", t)
+                  if not m:
+                      return "DECIMAL(38,18)"
+                  p = int(m.group(1))
+                  s = int(m.group(2)) if m.group(2) is not None else 0
+                  return normalize_decimal(p, s)
+
+              if t.startswith("BIGINT"):
+                  return "BIGINT"
+              if t.startswith(("INT", "INTEGER", "SMALLINT", "TINYINT")):
+                  return "INT"
+
+              return "STRING"
+
+          def build_databricks_ddl(columns):
+              mode = "CREATE OR REPLACE TABLE" if write_mode == "OR_REPLACE" else "CREATE TABLE IF NOT EXISTS"
+
+              ddl_cols = []
+              has_audit = False
+              for col_name, src_type in columns:
+                  if col_name.lower() == "load_dt_tm":
+                      has_audit = True
+                  tgt_type = map_type_to_databricks(src_type)
+                  ddl_cols.append(f"  {quote_ident(col_name)} {tgt_type}")
+
+              if include_audit_column and not has_audit:
+                  ddl_cols.append("  load_dt_tm TIMESTAMP")
+
+              ddl = [
+                  f"{mode} {quote_ident(target_schema)}.{quote_ident(target_table)} (",
+                  ",\n".join(ddl_cols),
+                  ")",
+                  "USING DELTA;",
+              ]
+              return "\n".join(ddl)
+
+          dataset_yaml = Path(f"datasets/{dataset}/conf/dataset_definition.yaml")
+          if not dataset_yaml.exists():
+              print(f"::error::Dataset definition not found: {dataset_yaml}")
+              sys.exit(1)
+
+          print(f"[INFO] Loading dataset definition: {dataset_yaml}")
+          with dataset_yaml.open("r", encoding="utf-8") as f:
+              cfg = yaml.safe_load(f)
+
+          jobs = cfg.get("jobs", [])
+          input_cfg = None
+          for job in jobs:
+              if str(job.get("name", "")).strip() != use_job:
+                  continue
+              for step in job.get("steps", []):
+                  if str(step.get("name", "")).strip() != use_step:
+                      continue
+                  input_cfg = (
+                      step.get("configuration", {})
+                      .get("input", {})
+                  )
+                  break
+              if input_cfg is not None:
+                  break
+
+          if input_cfg is None:
+              print("::error::Could not find matching job/step in dataset definition")
+              sys.exit(1)
+
+          src_secret_map = input_cfg.get("src_secret", {})
+          secret_ref = src_secret_map.get(env_name)
+          if not secret_ref:
+              print(f"::error::src_secret not found for environment {env_name}")
+              sys.exit(1)
+
+          stage_status["secret_reference"] = "PASS"
+          redacted = secret_ref
+          if len(secret_ref) > 16:
+              redacted = secret_ref[:24] + "***" + secret_ref[-6:]
+          print(f"[PASS] Secret reference resolved: {redacted}")
+
+          # Fetch secret from AWS Secrets Manager.
+          try:
+              import boto3
+
+              client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+              sec = client.get_secret_value(SecretId=secret_ref)
+              secret_str = sec.get("SecretString", "")
+              if not secret_str:
+                  raise ValueError("SecretString is empty")
+              secret_obj = json.loads(secret_str)
+              stage_status["secret_fetch"] = "PASS"
+              print("[PASS] Secret fetched successfully")
+          except Exception as e:
+              print(f"::error::Failed to fetch secret: {e}")
+              print("[RESULT] Stage summary:")
+              for k, v in stage_status.items():
+                  print(f"- {k}: {v}")
+              sys.exit(1)
+
+          # Common secret key fallbacks used across teams.
+          host = secret_obj.get("host") or secret_obj.get("hostname")
+          user = secret_obj.get("user") or secret_obj.get("username")
+          password = secret_obj.get("password")
+
+          if not (host and user and password):
+              print("::error::Secret does not contain required base keys (host, user/username, password)")
+              print("[RESULT] Stage summary:")
+              for k, v in stage_status.items():
+                  print(f"- {k}: {v}")
+              sys.exit(1)
+
+          try:
+              rows = []
+
+              if source_type == "trino":
+                  import trino
+
+                  port = int(secret_obj.get("port", 443))
+                  conn = trino.dbapi.connect(
+                      host=host,
+                      port=port,
+                      user=user,
+                      http_scheme="https",
+                      auth=trino.auth.BasicAuthentication(user, password),
+                  )
+                  stage_status["network_connection"] = "PASS"
+                  stage_status["auth"] = "PASS"
+                  print("[PASS] Trino network connection and auth succeeded")
+
+                  cur = conn.cursor()
+                  cat = source_catalog or ""
+                  if cat:
+                      query = f"""
+                      SELECT column_name, data_type
+                      FROM {cat}.information_schema.columns
+                      WHERE table_schema = '{source_schema}'
+                        AND table_name = '{table_name}'
+                      ORDER BY ordinal_position
+                      """
+                  else:
+                      query = f"""
+                      SELECT column_name, data_type
+                      FROM information_schema.columns
+                      WHERE table_schema = '{source_schema}'
+                        AND table_name = '{table_name}'
+                      ORDER BY ordinal_position
+                      """
+                  cur.execute(query)
+                  rows = cur.fetchall()
+
+              elif source_type == "oracle":
+                  import oracledb
+
+                  port = int(secret_obj.get("port", 1521))
+                  service_name = secret_obj.get("service_name") or secret_obj.get("service")
+                  sid = secret_obj.get("sid")
+                  if sid:
+                      dsn = oracledb.makedsn(host, port, sid=sid)
+                  elif service_name:
+                      dsn = oracledb.makedsn(host, port, service_name=service_name)
+                  else:
+                      raise ValueError("Oracle secret requires service_name/service or sid")
+
+                  conn = oracledb.connect(user=user, password=password, dsn=dsn)
+                  stage_status["network_connection"] = "PASS"
+                  stage_status["auth"] = "PASS"
+                  print("[PASS] Oracle network connection and auth succeeded")
+
+                  cur = conn.cursor()
+                  query = """
+                  SELECT
+                    column_name,
+                    data_type ||
+                    CASE
+                      WHEN data_type = 'NUMBER' AND data_precision IS NOT NULL AND data_scale IS NOT NULL
+                        THEN '(' || data_precision || ',' || data_scale || ')'
+                      WHEN data_type = 'NUMBER' AND data_precision IS NOT NULL
+                        THEN '(' || data_precision || ')'
+                      WHEN data_type IN ('VARCHAR2', 'NVARCHAR2', 'CHAR', 'NCHAR')
+                        THEN '(' || char_length || ')'
+                      ELSE ''
+                    END AS rendered_type
+                  FROM all_tab_columns
+                  WHERE owner = :owner
+                    AND table_name = :table_name
+                  ORDER BY column_id
+                  """
+                  cur.execute(query, owner=source_schema.upper(), table_name=table_name.upper())
+                  rows = cur.fetchall()
+
+              elif source_type == "sqlserver":
+                  import pymssql
+
+                  port = int(secret_obj.get("port", 1433))
+                  database = secret_obj.get("database") or secret_obj.get("db")
+                  if not database:
+                      raise ValueError("SQL Server secret requires database or db")
+
+                  conn = pymssql.connect(
+                      server=f"{host}:{port}",
+                      user=user,
+                      password=password,
+                      database=database,
+                      login_timeout=20,
+                      timeout=30,
+                  )
+                  stage_status["network_connection"] = "PASS"
+                  stage_status["auth"] = "PASS"
+                  print("[PASS] SQL Server network connection and auth succeeded")
+
+                  cur = conn.cursor()
+                  query = """
+                  SELECT
+                    COLUMN_NAME,
+                    DATA_TYPE +
+                    CASE
+                      WHEN DATA_TYPE IN ('varchar','nvarchar','char','nchar') AND CHARACTER_MAXIMUM_LENGTH IS NOT NULL
+                        THEN '(' + CASE WHEN CHARACTER_MAXIMUM_LENGTH = -1 THEN 'max' ELSE CAST(CHARACTER_MAXIMUM_LENGTH AS VARCHAR(10)) END + ')'
+                      WHEN DATA_TYPE IN ('decimal','numeric') AND NUMERIC_PRECISION IS NOT NULL AND NUMERIC_SCALE IS NOT NULL
+                        THEN '(' + CAST(NUMERIC_PRECISION AS VARCHAR(10)) + ',' + CAST(NUMERIC_SCALE AS VARCHAR(10)) + ')'
+                      ELSE ''
+                    END AS rendered_type
+                  FROM INFORMATION_SCHEMA.COLUMNS
+                  WHERE TABLE_SCHEMA = %s
+                    AND TABLE_NAME = %s
+                  ORDER BY ORDINAL_POSITION
+                  """
+                  cur.execute(query, (source_schema, table_name))
+                  rows = cur.fetchall()
+
+              else:
+                  raise ValueError(f"Unsupported source_type: {source_type}")
+
+              if not rows:
+                  raise RuntimeError("No metadata rows returned")
+
+              stage_status["metadata"] = "PASS"
+              print("[PASS] Metadata fetch succeeded (first 10 columns):")
+              for i, (col, dtype) in enumerate(rows[:10], start=1):
+                  print(f"  {i:02d}. {col} -> {dtype}")
+
+              ddl = build_databricks_ddl(rows)
+              print("[DDL] Draft Databricks statement:")
+              print(ddl)
+
+                out_file = os.environ.get("DDL_OUTPUT_FILE", "generated_ddl.sql")
+                with open(out_file, "w", encoding="utf-8") as f:
+                  f.write(ddl + "\n")
+                print(f"[INFO] DDL written to {out_file}")
+
+          except Exception as e:
+              print(f"::error::Source metadata check failed for {source_type}: {e}")
+
+          print("[RESULT] Stage summary:")
+          for k, v in stage_status.items():
+              print(f"- {k}: {v}")
+
+          if "FAIL" in stage_status.values():
+              sys.exit(1)
+          PY
+
+      - name: Upload generated DDL artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: connected-mode-generated-ddl
+          path: generated_ddl.sql
+          if-no-files-found: error
+
+      - name: Require confirmation for Databricks deploy
+        if: ${{ inputs.deploy-to-databricks == 'yes' && inputs.deploy-confirmation != 'APPLY' }}
+        run: |
+          echo "Deployment requested, but confirmation is missing."
+          echo "Set deploy-confirmation to APPLY after reviewing the generated DDL artifact."
+          exit 1
+
+      - name: Execute DDL in Databricks (confirmed)
+        if: ${{ inputs.deploy-to-databricks == 'yes' && inputs.deploy-confirmation == 'APPLY' }}
+        env:
+          ENV_NAME: ${{ inputs.environment }}
+          DATABRICKS_HTTP_PATH: ${{ secrets.DATABRICKS_HTTP_PATH }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+          DATABRICKS_HOST_OVERRIDE: ${{ secrets.DATABRICKS_HOST }}
+          DDL_FILE: generated_ddl.sql
+        run: |
+          python << 'PY'
+          import json
+          import os
+          import requests
+
+          env_name = os.environ["ENV_NAME"].strip("_")
+          host = os.environ.get("DATABRICKS_HOST_OVERRIDE")
+          if not host:
+              host = f"https://merck-mrldhetl-{env_name}-dbricks-ws.cloud.databricks.com"
+
+          http_path = os.environ["DATABRICKS_HTTP_PATH"]
+          token = os.environ["DATABRICKS_TOKEN"]
+          ddl_file = os.environ.get("DDL_FILE", "generated_ddl.sql")
+
+          with open(ddl_file, "r", encoding="utf-8") as f:
+              ddl = f.read().strip()
+
+          warehouse_id = http_path.rstrip("/").split("/")[-1]
+          api_url = f"{host}/api/2.0/sql/statements"
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Content-Type": "application/json",
+          }
+          payload = {
+              "warehouse_id": warehouse_id,
+              "statement": ddl,
+              "wait_timeout": "50s",
+          }
+
+          resp = requests.post(api_url, headers=headers, json=payload, timeout=90)
+          resp.raise_for_status()
+          data = resp.json()
+          state = data.get("status", {}).get("state", "UNKNOWN")
+
+          if state in ("PENDING", "RUNNING"):
+              stmt_id = data["statement_id"]
+              poll = requests.get(f"{api_url}/{stmt_id}", headers=headers, timeout=90)
+              poll.raise_for_status()
+              data = poll.json()
+              state = data.get("status", {}).get("state", "UNKNOWN")
+
+          print(f"Databricks SQL execution state: {state}")
+          if state != "SUCCEEDED":
+              err = data.get("status", {}).get("error", {}).get("message", "Unknown Databricks SQL error")
+              raise RuntimeError(err)
+
+          print("DDL executed successfully in Databricks.")
+          PY

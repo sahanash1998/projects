@@ -1,0 +1,57 @@
+#
+#
+# WORKFLOW FOR SERVING THE PROCESS OF INITIALIZATION OF PROJECT SPECIFIC DATASET REPO
+#
+#
+name: "[DIFW_projects] Init repository"
+run-name: "[DIFW_projects] Init repository - ${{ github.actor }}"
+on:
+  # run without parameters
+  workflow_dispatch:
+
+jobs:
+  # ====================================================================================================================
+  # This job will call python utility to run repository initializer
+  # ====================================================================================================================
+  run-repository-initializer:
+    runs-on: [ "linux-x64-medium" ]
+    steps:
+      #
+      # Checkout automation repo first
+      #
+      - name: Checkout automation repository
+        uses: actions/checkout@v4
+        with:
+          repository: "merck-gen/mf-difw-automation"
+          ref: 'main'
+          token: ${{ secrets.SRV_GITHUB_TOKEN }}
+          path: 'automation_repo'
+
+      #
+      # Setup python
+      #
+      - name: Setup python
+        uses: merck-gen/dso-gha-python-setup@v1.0.1
+        with:
+          python-version: '3.10'
+
+      #
+      # Install requirements
+      #
+      - name: Install python requirements
+        run: pip install -r automation_repo/resources/init_job_py_requirements.txt pip install -i https://artifacts.merck.com/artifactory/api/pypi/pypi-main-dev/simple --no-deps
+
+      #
+      # Print initial setup
+      #
+      - name: Run initialization job
+        env:
+          PYTHONPATH: "${{ github.workspace }}/automation_repo/src/tools/init_dataset_repo:${{ github.workspace }}/automation_repo/src/tools"
+          REQUESTS_CA_BUNDLE: "/etc/ssl/certs/ca-certificates.crt"
+        run: |
+          python automation_repo/src/tools/init_dataset_repo/repo_initializer.py \
+          --project_name ${{ vars.PROJECT_NAME }} \
+          --github_token ${{ secrets.SRV_GITHUB_TOKEN }} \
+          --github_user ${{ secrets.SRV_GITHUB_USER }} \
+          --workspace_path ${{ github.workspace }} \
+          --automation_repo_path ${{ github.workspace }}/automation_repo
