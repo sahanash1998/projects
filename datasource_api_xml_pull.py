@@ -1,8 +1,8 @@
 #-----------------------------------------------------------------------------------------------------------------
-# Program: ienvision_person_xml_pull.py
+# Program: xml_pull.py
 # Created Date: 06/13/2023
-# Created By: Accenture
-# Modified Date: 03/12/2024
+# Created By: 
+# Modified Date: 
 # Release Version: 1.0
 #-----------------------------------------------------------------------------------------------------------------
 from pipeline.spark.loaders.spark_loader import SparkLoader
@@ -16,7 +16,7 @@ import sys
 import time
 
 
-class IenvisionPersonXmlPull(SparkLoader):
+class DatasourceApiXmlPull(SparkLoader):
     """
     Class provides possibilities to load data from custom source.
     """
@@ -108,7 +108,7 @@ class IenvisionPersonXmlPull(SparkLoader):
             s3.put_object(
                 Bucket=S3_BUCKET,
                 Body=Data,
-                Key='work/ienvision/ienvision_person/' + s3_file_name + '_1.xml',
+                Key='folder/vision/' + s3_file_name + '_1.xml',
                 ACL='bucket-owner-full-control'
             )
 
@@ -172,7 +172,7 @@ class IenvisionPersonXmlPull(SparkLoader):
                         s3.put_object(
                             Bucket=S3_BUCKET,
                             Body=Data,
-                            Key='work/ienvision/ienvision_person/' + s3_file_name + '_' + str(page) + '.xml',
+                            Key='folder/vision/' + s3_file_name + '_' + str(page) + '.xml',
                             ACL='bucket-owner-full-control'
                         )
                         page = page + 1
@@ -213,7 +213,7 @@ class IenvisionPersonXmlPull(SparkLoader):
                         s3.put_object(
                             Bucket=S3_BUCKET,
                             Body=Data,
-                            Key='work/ienvision/ienvision_person/' + s3_file_name + '_' + str(page) + '.xml',
+                            Key='folder/vision/' + s3_file_name + '_' + str(page) + '.xml',
                             ACL='bucket-owner-full-control'
                         )
                         page = page + 1
