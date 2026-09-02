@@ -1,0 +1,41 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.merck.gmabi.data-ingest</groupId>
+        <artifactId>datalake-etl-datasets</artifactId>
+        <version>1.0.0</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <packaging>pom</packaging>
+    <groupId>com.merck.gmabi.data-ingest</groupId>
+    <artifactId>Vision</artifactId>
+    <version>1.0.0</version>
+    <name>Vision</name>
+
+    <dependencies>   
+        <dependency>
+            <groupId>com.merck.nga.data-ingest.nextgen-etl-pipeline-tools</groupId>
+            <artifactId>SparkCustomJDBC</artifactId>
+            <version>3.2.0</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>*</groupId>
+                    <artifactId>*</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>io.delta</groupId>
+            <artifactId>delta-core_2.12</artifactId>
+            <version>2.3.0</version>
+        </dependency>
+    </dependencies>
+
+    <properties>
+        <nextgen.etl.framework.version>2.7.0</nextgen.etl.framework.version>
+    </properties>
+
+</project>
