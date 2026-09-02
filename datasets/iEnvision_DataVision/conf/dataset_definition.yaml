@@ -1,0 +1,158 @@
+dataset_name: Vision
+region: us-east-1
+
+resource_prefix: "m_abi_{{dataset_name}}"
+
+# Global retry setting - can be overriden at the jon level
+retries: 0
+retry_delay: 60
+
+_template_aws_accounts_:
+  name: aws_accounts
+
+_template_databricks_template_:
+  name: databricks_template
+
+airflow_tags :
+  - "ml_abi"
+
+#schedule: "0 4 * * *"   # Runs at 4:00 AM UTC every day
+
+platform : databricks
+
+glue_databases: {}
+
+s3_paths :
+  latest_path: latest
+  c_path: "{{dataset_name}}/c/"
+
+placeholders:
+  latest_bucket: "data-{{env}}"
+
+airflow_event_handlers:
+  on_task_failure:
+    email_message:
+      to: abi-{{env}}-job-noti@merck.com
+      subject: "Failure in {dag.dag_id}.{task.task_id}"
+      html_content: |
+        Task <b>{task.task_id}</b> failed with error:<br><pre>{exception}</pre><br>
+        <a href="{airflow_url}/log?execution_date={execution_date:%Y%m%dT%H%M%S.%f}&amp;task_id={task.task_id}&amp;dag_id={dag.dag_id}">Log</a>
+  on_task_success:
+    all_tables: true
+    email_message:
+      to: gmabi-{{env}}-job-noti@merck.com
+      subject: "Success in {dag.dag_id}.{task.task_id}"
+      html_content: |
+       Task <b>{task.task_id}</b> completed successfully
+        <a href="{airflow_url}/log?execution_date={execution_date:%Y%m%dT%H%M%S.%f}&amp;task_id={task.task_id}&amp;dag_id={dag.dag_id}">Log</a>
+        
+jobs:
+  # One job for each region that will run in sequence
+  - name: stage_loader
+    type: spark_databricks
+    retries: 1
+    steps:
+      - name: stage_loader
+        configuration:
+          input:
+            # Camel cased loader code - pipeline/spark/loaders
+            format: document_xml_pull
+            # parameters passed to loader
+            # _dev_ _tst_, _prod_ are predefined based on run environment
+            src_secret:
+              _dev_: 'arn:aws:secretsmanager:us-east-1:'
+              _tst_: 'arn:aws:secretsmanager:us-east-1:'
+              _prd_: 'arn:aws:secretsmanager:us-east-1:'
+            src_id: 12
+            src_system: "{{dataset_name}}"
+            catalog_name: "mrl_gmabi_{{env}}"
+            S3_BUCKET: "abi-data-{{env}}"
+            s3_file_name: "DvDocument"
+            api_url: "/api/search/?&qualifier=API"
+            last_run_date: "2020-01-01"
+            #last_run_date : "select min(last_run_date) from {catalog_name}.gmadw_integration_schema.src_map_dtl where src_id=12 and objct_id in(2,3,4,5,6,7,8,9,10);"
+            # seperate by ; if using more than one email
+            email_list: gmabi-{{env}}-job-noti@merck.com
+  - name: csv_loader
+    type: spark_databricks
+    dependency:
+      - stage_loader
+    retries: 1
+    steps:
+      - name: csv_loader
+        configuration:
+          input:
+            # Camel cased loader code - pipeline/spark/loaders
+            format: dvdocument_xml_to_csv
+            # parameters passed to loader
+            # _dev_ _tst_, _prod_ are predefined based on run environment
+            src_id: 12
+            src_system: "{{dataset_name}}"
+            catalog_name: "abi_{{env}}"
+            S3_BUCKET: "abi-data-{{env}}"
+            # seperate by ; if using more than one email
+            email_list: gmabi-{{env}}-job-noti@gmail.com
+
+  - name: pub_loader
+    type: spark_databricks
+    dependency:
+      - csv_loader
+    retries: 1
+    steps:
+      - name: pub_loader
+        configuration:
+          input:
+            # Camel cased loader code - pipeline/spark/loaders
+            format: vision_pub_loader
+            # parameters passed to loader
+            # _dev_ _tst_, _prod_ are predefined based on run environment
+            src_id: 12
+            src_system: "{{dataset_name}}"
+            catalog_name: "abi_{{env}}"
+            stage_volume_path: "/Volumes/abi_{{env}}/vision_stage/stage_volume"
+            # seperate by ; if using more than one email
+            email_list: 'abi-{{env}}-job-noti@gmail.com'            
+  - name: common_loader
+    type: spark_databricks
+    # dependency:
+    #   - pub_loader
+    retries: 1
+    steps:
+      - name: common_loader
+        configuration:
+          input:
+            # Camel cased loader code - pipeline/spark/loaders
+            format: refresh_loader
+            # parameters passed to loader
+            src_id: 12
+            data_set: "Vision"
+            src_system: "{{dataset_name}}"
+            catalog_name: "abi_{{env}}"
+            # seperate by ; if using more than one email
+            email_list: abi-{{env}}-job-noti@gmail.com
+  # One job for each region that will run in sequence
+# Not used by us but needed to compile the yaml
+  
+  - name: archive_loader
+    type: spark_databricks
+    dependency:
+      - pub_loader
+    steps:
+     - name: archive_loader
+       configuration:
+         input:
+           # Camel cased loader code - dataset_modules/pipeline/spark/loaders
+           format: vision_archive_loader
+           # parameters passed to loader
+           # _dev_ _tst_, _prod_ are predefined based on run environment
+           src_id: 12
+           src_system: "{{dataset_name}}"
+           stage_s3_bucket: "abi-data-{{env}}"
+           archive_s3_bucket: "abi-data-{{env}}"
+           stage_path: "stage_data/Vision/"
+           archive_path: "history_data/Vision/"
+           # seperate by ; if using more than one email
+           email_list: abi-{{env}}-job-noti@gmail.com
+  
+tables:
+  - name: "{{dataset_name}}"
